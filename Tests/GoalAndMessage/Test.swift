@@ -53,6 +53,16 @@ import SQLite3
         catch { precondition(error.localizedDescription.contains("no such table")) }
         precondition(DesktopGoalAutomation.resumeLabels.contains("目標を再開"))
         precondition(!DesktopGoalAutomation.resumeLabels.contains("Resume"), "Generic buttons must not match")
+        let capped = scanTree(root: 0, maxNodes: 4, maxSeconds: 10) { node in node == 0 ? [1, 2, 3, 4] : [] }
+        precondition(capped.nodes == [0, 1, 2, 3] && capped.pendingCount == 0 && capped.limitHit)
+        let cyclic = scanTree(root: 0, maxNodes: 10, maxSeconds: 10) { node in node == 0 ? [1, 1] : [0] }
+        precondition(cyclic.nodes == [0, 1] && !cyclic.limitHit)
+        var clock: TimeInterval = 0
+        let timeout = scanTree(root: 0, maxNodes: 10, maxSeconds: 2, now: { clock += 1; return clock }) { _ in [1, 2] }
+        precondition(timeout.timedOut && timeout.pendingCount > 0)
+        let expanded = scanTree(root: 0, maxNodes: 8, maxSeconds: 10) { node in node == 0 ? Array(1...6) : [] }
+        precondition(expanded.nodes.contains(6) && !expanded.limitHit)
+        print("PASS: queued nodes processed at limit, cycles deduplicated, timeout reported, larger scan reaches later controls")
         // Failure in either path must not gate the other path.
         let failure = NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: "injected failure"])
         for goalFails in [false, true] {
