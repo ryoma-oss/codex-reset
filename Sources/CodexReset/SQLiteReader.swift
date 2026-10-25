@@ -25,24 +25,25 @@ final class SQLiteReader {
     private var threadHistoryPath: String { codexHome + "/thread_history_1.sqlite" }
     private var stateDbPath: String { codexHome + "/state_5.sqlite" }
 
-    /// 找出所有因用量上限(usageLimitExceeded)失败暂停的线程（每线程取最新一次失败）。
-    /// thread_turns 中 turn_id 为 ULID，按 turn_id 倒序即按时间倒序。
+    /// Show only chats whose latest turn is a quota-limit failure.
+    /// A subsequent completed/running/interrupted/other-failure turn removes the chat.
     func usageLimitedThreads(limit: Int = 20) -> [PausedThread] {
+        guard limit > 0 else { return [] }
         guard let rows = queryRows(
             path: threadHistoryPath,
             sql: """
-            SELECT t.thread_id, t.error_json, t.started_at
-            FROM thread_turns t
-            JOIN (
-                SELECT thread_id, MAX(turn_id) AS max_turn
+            WITH latest AS (
+                SELECT thread_id, error_json, started_at, turn_id, status,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY thread_id ORDER BY started_at DESC, turn_id DESC
+                       ) AS position
                 FROM thread_turns
-                WHERE status = 'failed' AND error_json LIKE '%usageLimitExceeded%'
-                GROUP BY thread_id
-            ) m ON t.thread_id = m.thread_id AND t.turn_id = m.max_turn
-            ORDER BY t.turn_id DESC
-            LIMIT ?
-            """,
-            args: [limit]
+            )
+            SELECT thread_id, error_json, started_at FROM latest
+            WHERE position = 1 AND status = 'failed'
+              AND error_json LIKE '%usageLimitExceeded%'
+            ORDER BY started_at DESC, turn_id DESC
+            """
         ) else { return [] }
 
         var result: [PausedThread] = []
@@ -51,13 +52,20 @@ final class SQLiteReader {
             let errorJson = row[1] as? String ?? ""
             let failedAt = row[2] as? Int ?? 0
             guard !threadId.isEmpty else { continue }
-            // 过滤子代理线程（主对话派生的 subagent，非用户独立对话，无需单独继续）
-            if isSubagentThread(threadId: threadId) { continue }
+            // Match All chats visibility, and verify the actual error code rather than message text.
+            guard let state = queryRow(path: stateDbPath,
+                                       sql: "SELECT source, archived FROM threads WHERE id = ?", args: [threadId]),
+                  let source = state[0] as? String, let archived = state[1] as? Int,
+                  archived == 0, !source.trimmingCharacters(in: .whitespaces).hasPrefix(#"{"subagent""#),
+                  let data = errorJson.data(using: .utf8),
+                  let error = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  error["codexErrorInfo"] as? String == "usageLimitExceeded" else { continue }
             let title = displayTitle(threadId: threadId, stateTitle: threadTitle(threadId: threadId))
             let cwd = threadCwd(threadId: threadId) ?? ""
             let hint = Self.extractRecoveryHint(from: errorJson)
             result.append(PausedThread(threadId: threadId, title: title, cwd: cwd,
                                        recoveryHint: hint, failedAt: failedAt))
+            if result.count >= limit { break }
         }
         return result
     }

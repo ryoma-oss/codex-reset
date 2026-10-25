@@ -29,6 +29,24 @@ swiftc -parse-as-library -lsqlite3 Sources/CodexReset/GoalState.swift Sources/Co
 /tmp/codexreset-goal-test
 ```
 
+## Paused chats versus All chats
+
+**Paused chats** contains only visible, non-archived, non-subagent chats whose
+latest turn (ordered by start time, then turn ID) failed with the actual
+`usageLimitExceeded` error code. Older quota failures are ignored if any later
+turn exists, including a running, completed, interrupted, or differently failed
+turn. Forks are checked separately by chat ID. **All chats** is unchanged and
+can be used to preselect chats before they hit the limit. At quota recovery,
+checked chats from both lists are combined and deduplicated by ID. Selection
+currently lasts only until the app restarts.
+
+Regression checks:
+
+```bash
+swiftc -lsqlite3 Sources/CodexReset/SQLiteReader.swift Tests/PausedChats/main.swift -o /tmp/codexreset-paused-test
+/tmp/codexreset-paused-test
+```
+
 ## Activity log archive
 
 Logs are written locally to `~/Library/Logs/CodexReset/activity-YYYY-MM-DD.jsonl`
