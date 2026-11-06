@@ -17,6 +17,7 @@ struct PausedThread {
 
 final class SQLiteReader {
     let codexHome: String
+    private let rolloutReader = RolloutTurnStateReader()
 
     init(codexHome: String) {
         self.codexHome = codexHome
@@ -39,7 +40,7 @@ final class SQLiteReader {
                        ) AS position
                 FROM thread_turns
             )
-            SELECT thread_id, error_json, started_at FROM latest
+            SELECT thread_id, error_json, started_at, turn_id FROM latest
             WHERE position = 1 AND status = 'failed'
               AND error_json LIKE '%usageLimitExceeded%'
             ORDER BY started_at DESC, turn_id DESC
@@ -50,24 +51,35 @@ final class SQLiteReader {
         for row in rows {
             let threadId = row[0] as? String ?? ""
             let errorJson = row[1] as? String ?? ""
-            let failedAt = row[2] as? Int ?? 0
+            var failedAt = row[2] as? Int ?? 0
+            let failedTurnId = row[3] as? String ?? ""
             guard !threadId.isEmpty else { continue }
             // Match All chats visibility, and verify the actual error code rather than message text.
             guard let state = queryRow(path: stateDbPath,
-                                       sql: "SELECT source, archived FROM threads WHERE id = ?", args: [threadId]),
+                                       sql: "SELECT source, archived, rollout_path FROM threads WHERE id = ?", args: [threadId]),
                   let source = state[0] as? String, let archived = state[1] as? Int,
                   archived == 0, !source.trimmingCharacters(in: .whitespaces).hasPrefix(#"{"subagent""#),
                   let data = errorJson.data(using: .utf8),
                   let error = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   error["codexErrorInfo"] as? String == "usageLimitExceeded" else { continue }
+            var recoveryHintOverride: String?
+            if let path = state[2] as? String,
+               let rollout = rolloutReader.latest(path: path), rollout.id != failedTurnId,
+               rollout.startedAt >= TimeInterval(failedAt) {
+                // The app may restore a chat to a new rollout before the history DB catches up.
+                guard rollout.status == .quotaFailure else { continue }
+                failedAt = Int(rollout.startedAt)
+                if let message = rollout.errorMessage, let range = message.range(of: "try again at ") {
+                    recoveryHintOverride = String(message[range.upperBound...])
+                }
+            }
             let title = displayTitle(threadId: threadId, stateTitle: threadTitle(threadId: threadId))
             let cwd = threadCwd(threadId: threadId) ?? ""
-            let hint = Self.extractRecoveryHint(from: errorJson)
+            let hint = recoveryHintOverride ?? Self.extractRecoveryHint(from: errorJson)
             result.append(PausedThread(threadId: threadId, title: title, cwd: cwd,
                                        recoveryHint: hint, failedAt: failedAt))
-            if result.count >= limit { break }
         }
-        return result
+        return Array(result.sorted { $0.failedAt > $1.failedAt }.prefix(limit))
     }
 
     /// 列出所有对话（含未暂停的），按项目分组用；过滤归档与子代理线程，最新在前

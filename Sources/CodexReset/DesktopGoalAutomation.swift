@@ -135,6 +135,15 @@ struct DesktopGoalAutomation {
         guard NSWorkspace.shared.open(url) else { throw desktopError("Cannot open target chat") }
         app.activate(options: [.activateIgnoringOtherApps])
         let root = AXUIElementCreateApplication(app.processIdentifier)
+        // Electron may expose only the native window shell until assistive technology
+        // requests its web accessibility tree. Never toggle it off or change OS grants.
+        if (attribute(root, "AXManualAccessibility") as? Bool) == true {
+            log("AXManualAccessibility already enabled: thread=\(threadId)")
+        } else {
+            let result = AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            log("AXManualAccessibility enable requested: thread=\(threadId), result=\(result.rawValue)")
+            if result == .success { try await Task.sleep(nanoseconds: 300_000_000) }
+        }
         var target: AXUIElement?
         for _ in 0..<20 {
             if let window = focusedWindow(root), identifies(window, title: title) { target = window; break }
@@ -192,6 +201,12 @@ struct DesktopGoalAutomation {
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "<none>"
         let errorText = errors.keys.sorted().map { "\($0):\(errors[$0]!)" }.joined(separator: ",")
         log("AX scan: thread=\(threadId), stage=\(stage), visited=\(tree.nodes.count), admitted=\(tree.admittedCount), pending=\(tree.pendingCount), limit=\(limit), limitHit=\(tree.limitHit), timedOut=\(tree.timedOut), childErrors=[\(errorText)], front=\(front), active=\(app?.isActive ?? false), hidden=\(app?.isHidden ?? false), axTrusted=\(AXIsProcessTrusted()), windowTitle=\(string(window, kAXTitleAttribute))")
+        if tree.nodes.count < 100 {
+            var roles: [String: Int] = [:]
+            for node in tree.nodes { roles[string(node.element, kAXRoleAttribute), default: 0] += 1 }
+            let census = roles.keys.sorted().map { "\($0)=\(roles[$0]!)" }.joined(separator: ",")
+            log("AX small-tree roles: thread=\(threadId), stage=\(stage), \(census)")
+        }
         return tree.nodes.map(\.element)
     }
     private func identifies(_ window: AXUIElement, title: String) -> Bool {

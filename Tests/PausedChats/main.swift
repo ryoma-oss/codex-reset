@@ -10,7 +10,7 @@ precondition(sqlite3_open(dir.appendingPathComponent("state_5.sqlite").path, &st
 defer { sqlite3_close(history); sqlite3_close(state) }
 func sql(_ db: OpaquePointer?, _ query: String) { precondition(sqlite3_exec(db, query, nil, nil, nil) == SQLITE_OK) }
 sql(history, "CREATE TABLE thread_turns(thread_id TEXT, turn_id TEXT, status TEXT, error_json TEXT, started_at INTEGER)")
-sql(state, "CREATE TABLE threads(id TEXT, name TEXT, title TEXT, cwd TEXT, source TEXT, archived INTEGER, updated_at INTEGER, updated_at_ms INTEGER)")
+sql(state, "CREATE TABLE threads(id TEXT, name TEXT, title TEXT, cwd TEXT, source TEXT, archived INTEGER, updated_at INTEGER, updated_at_ms INTEGER, rollout_path TEXT)")
 let quota = #"{"codexErrorInfo":"usageLimitExceeded","message":"try again at 13:18"}"#
 func turn(_ chat: String, _ turn: String, _ status: String, _ started: Int, _ error: String? = nil) {
     var stmt: OpaquePointer?
@@ -27,7 +27,7 @@ func turn(_ chat: String, _ turn: String, _ status: String, _ started: Int, _ er
 for name in ["limited", "completed", "running", "interrupted", "other-error", "text-only", "malformed", "archived", "subagent", "fork-parent", "fork-child"] {
     let archived = name == "archived" ? 1 : 0
     let source = name == "subagent" ? #"{"subagent":{}}"# : "vscode"
-    sql(state, "INSERT INTO threads VALUES('\(name)', '\(name)', '\(name)', '/fixture', '\(source)', \(archived), 0, 0)")
+    sql(state, "INSERT INTO threads VALUES('\(name)', '\(name)', '\(name)', '/fixture', '\(source)', \(archived), 0, 0, NULL)")
 }
 turn("limited", "z-old", "completed", 100)
 turn("limited", "a-new", "failed", 1000, quota) // Timestamp outranks lexical turn ID.
@@ -54,6 +54,30 @@ precondition(reader.usageLimitedThreads(limit: 1).map(\.threadId) == ["fork-chil
 precondition(reader.usageLimitedThreads(limit: 0).isEmpty)
 let all = Set(reader.allThreads().map(\.threadId))
 precondition(rows.allSatisfy { all.contains($0.threadId) })
+// A new active/restored rollout must supersede the stale indexed failure.
+let rollout = dir.appendingPathComponent("current.jsonl")
+func event(_ type: String, time: String, id: String = "restored-turn", extra: [String: Any] = [:]) throws -> Data {
+    var payload: [String: Any] = ["type": type, "turn_id": id]
+    for (key, value) in extra { payload[key] = value }
+    var data = try JSONSerialization.data(withJSONObject: ["timestamp": time, "type": "event_msg", "payload": payload])
+    data.append(0x0A)
+    return data
+}
+try event("task_started", time: "2026-11-06T01:25:13.413Z").write(to: rollout)
+sql(state, "UPDATE threads SET rollout_path='\(rollout.path)' WHERE id='limited'")
+precondition(reader.usageLimitedThreads().map(\.threadId) == ["fork-child"])
+let handle = try FileHandle(forWritingTo: rollout)
+try handle.seekToEnd()
+try handle.write(contentsOf: event("task_complete", time: "2026-11-06T01:26:00Z"))
+precondition(reader.usageLimitedThreads().map(\.threadId) == ["fork-child"])
+try handle.write(contentsOf: event("task_started", time: "2026-11-06T01:27:00Z", id: "new-failure"))
+try handle.write(contentsOf: event("error", time: "2026-11-06T01:27:01Z", id: "new-failure", extra: ["codex_error_info": "usageLimitExceeded", "message": "try again at 15:00"]))
+let quotaRows = reader.usageLimitedThreads()
+precondition(quotaRows.first?.threadId == "limited" && quotaRows.first?.recoveryHint == "15:00")
+try handle.close()
+try event("task_started", time: "2026-11-06T02:00:00Z", id: "again-running").write(to: rollout, options: .atomic)
+precondition(reader.usageLimitedThreads().map(\.threadId) == ["fork-child"])
+print("PASS: restored active/completed rollout overrides stale failure; incremental updates; new quota failure; replaced rollout")
 turn("limited", "b-new", "inProgress", 3000)
 precondition(reader.usageLimitedThreads().map(\.threadId) == ["fork-child"])
 print("PASS: latest quota failures only; resumed/completed/interrupted/other errors excluded; exact error code; visibility; fork isolation; ordering; post-filter limit; refresh")
