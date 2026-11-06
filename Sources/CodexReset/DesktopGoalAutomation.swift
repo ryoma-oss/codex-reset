@@ -135,14 +135,25 @@ struct DesktopGoalAutomation {
         guard NSWorkspace.shared.open(url) else { throw desktopError("Cannot open target chat") }
         app.activate(options: [.activateIgnoringOtherApps])
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        // Electron may expose only the native window shell until assistive technology
-        // requests its web accessibility tree. Never toggle it off or change OS grants.
+        // Request the web accessibility tree on demand. Some desktop frameworks
+        // implement EnhancedUserInterface rather than Electron's ManualAccessibility.
+        // Never disable accessibility or change macOS grants.
         if (attribute(root, "AXManualAccessibility") as? Bool) == true {
             log("AXManualAccessibility already enabled: thread=\(threadId)")
         } else {
-            let result = AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-            log("AXManualAccessibility enable requested: thread=\(threadId), result=\(result.rawValue)")
-            if result == .success { try await Task.sleep(nanoseconds: 300_000_000) }
+            let manual = AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            log("AXManualAccessibility enable requested: thread=\(threadId), result=\(manual.rawValue)")
+            if manual == .success {
+                try await Task.sleep(nanoseconds: 300_000_000)
+            } else if manual == .attributeUnsupported {
+                if (attribute(root, "AXEnhancedUserInterface") as? Bool) == true {
+                    log("AXEnhancedUserInterface already enabled: thread=\(threadId)")
+                } else {
+                    let enhanced = AXUIElementSetAttributeValue(root, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+                    log("AXEnhancedUserInterface enable requested: thread=\(threadId), result=\(enhanced.rawValue)")
+                    if enhanced == .success { try await Task.sleep(nanoseconds: 500_000_000) }
+                }
+            }
         }
         var target: AXUIElement?
         for _ in 0..<20 {
