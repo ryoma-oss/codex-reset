@@ -129,7 +129,7 @@ final class SQLiteReader {
     }
 
     private func compactTitle(_ text: String) -> String {
-        let cleaned = text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let cleaned = ChatTitleIdentity.key(text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " "))
         return cleaned.count > 80 ? String(cleaned.prefix(80)) + "…" : cleaned
     }
 
