@@ -15,6 +15,41 @@ struct DeliveryReceipt {
         try read(threadId: threadId, after: ordinal, command: command).matched
     }
 
+    struct Baseline {
+        let ordinal: Int64?
+        let rollout: RolloutMessageCursor?
+    }
+
+    func capture(threadId: String) throws -> Baseline {
+        let at = Date()
+        let home = URL(fileURLWithPath: historyPath).deletingLastPathComponent().path
+        let rollout = RolloutMessageReceipt.capture(codexHome: home, threadId: threadId, at: at)
+        let ordinal = try? snapshot(threadId: threadId)
+        guard ordinal != nil || rollout != nil else { throw failure("No readable delivery evidence") }
+        return Baseline(ordinal: ordinal, rollout: rollout)
+    }
+
+    func received(threadId: String, command: String, after baseline: Baseline) throws -> Bool {
+        var readable = false
+        if let ordinal = baseline.ordinal {
+            do {
+                let received = try self.received(threadId: threadId, command: command, after: ordinal)
+                readable = true
+                if received { return true }
+            } catch { }
+        }
+        if let cursor = baseline.rollout {
+            do {
+                let home = URL(fileURLWithPath: historyPath).deletingLastPathComponent().path
+                let received = try RolloutMessageReceipt.received(codexHome: home, threadId: threadId, command: command, after: cursor)
+                readable = true
+                if received { return true }
+            } catch { }
+        }
+        guard readable else { throw failure("Delivery evidence is temporarily unreadable") }
+        return false
+    }
+
     private func read(threadId: String, after: Int64, command: String?) throws -> (ordinal: Int64, matched: Bool) {
         var db: OpaquePointer?
         guard sqlite3_open_v2(historyPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {

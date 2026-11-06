@@ -115,23 +115,36 @@ final class AutoContinueEngine {
                     let automation = await DesktopGoalAutomation(
                         codexHome: codexHome, threadId: threadId, resumeGoal: resumeGoalBeforeSending,
                         log: { [weak self] message in self?.onLog?(message, message) })
-                    let result = await ResumeAttempts.run(goal: {
-                        self.onLog?("开始独立的 Goal 恢复操作", "Goal path starting: thread=\(threadId)")
-                        return try await automation.resumeGoalIfNeeded()
-                    }, message: {
-                        self.onLog?("开始独立的 Continue 发送操作", "Continue path starting independently: thread=\(threadId)")
-                        let receipt = DeliveryReceipt(codexHome: self.codexHome)
-                        let before = try receipt.snapshot(threadId: threadId)
-                        self.onLog?("发送前聊天记录位置：\(before)", "GUI send baseline: thread=\(threadId), ordinal=\(before)")
-                        try await automation.send(command: command)
-                        for _ in 0..<30 {
-                            if try receipt.received(threadId: threadId, command: command, after: before) {
-                                self.onLog?("已确认目标聊天收到消息：\(threadId)", "Delivery confirmed in target chat: thread=\(threadId)")
-                                return
+                    let receipt = DeliveryReceipt(codexHome: self.codexHome)
+                    var baselines: [DeliveryReceipt.Baseline] = []
+                    let result = try await ResumeAttempts.repeating(previouslyDelivered: {
+                        for baseline in baselines {
+                            do {
+                                if try receipt.received(threadId: threadId, command: command, after: baseline) { return true }
+                            } catch {
+                                self.onLog?("到达确认读取失败：\(error.localizedDescription)", "Prior delivery check unavailable: \(error.localizedDescription)")
                             }
-                            try await Task.sleep(nanoseconds: 500_000_000)
                         }
-                        throw desktopError("Message delivery unconfirmed after 15s. No automatic resend; inspect the composer before retrying.")
+                        return false
+                    }, log: { message in self.onLog?(message, message) }, attempt: { _ in
+                        await ResumeAttempts.run(goal: {
+                            self.onLog?("开始独立的 Goal 恢复操作", "Goal path starting: thread=\(threadId)")
+                            return try await automation.resumeGoalIfNeeded()
+                        }, message: {
+                            self.onLog?("开始独立的 Continue 发送操作", "Continue path starting independently: thread=\(threadId)")
+                            let before = try receipt.capture(threadId: threadId)
+                            baselines.append(before)
+                            self.onLog?("发送前聊天记录位置：\(before.ordinal ?? -1)", "GUI send baseline: thread=\(threadId), ordinal=\(before.ordinal.map(String.init) ?? "unavailable"), rollout=\(before.rollout != nil)")
+                            try await automation.send(command: command)
+                            for _ in 0..<30 {
+                                if try receipt.received(threadId: threadId, command: command, after: before) {
+                                    self.onLog?("已确认目标聊天收到消息：\(threadId)", "Delivery confirmed in target chat: thread=\(threadId)")
+                                    return
+                                }
+                                try await Task.sleep(nanoseconds: 500_000_000)
+                            }
+                            throw desktopError("Message delivery unconfirmed after 15s.")
+                        })
                     })
                     lastDesktopSummary = result.summary
                     onLog?(result.summary, result.summary)

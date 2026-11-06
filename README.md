@@ -6,11 +6,17 @@ This is [ryoma-oss's fork](https://github.com/ryoma-oss/codex-reset) of
 ## Desktop delivery verification
 
 GUI sends use **Enter**. Codex must be configured to send messages with Enter.
-Before typing, the app reads the target chat's last user-message ordinal from
-local history. It reports success only after a new user message ending with the configured command appears in
-that same chat within 15 seconds. This confirms delivery, not execution or Goal
-activation. Delayed history writes may cause an unconfirmed result even when the
-message was sent; inspect the chat before retrying. There is no automatic retry; a failed chat does not stop the remaining selected chats.
+Before typing, the app captures the target chat's user-message ordinal and current
+rollout position. It reports success after a new user message ending with the configured
+command appears in either the history DB or that chat's current rollout within 15 seconds. This confirms delivery, not execution or Goal
+activation. If delivery is not confirmed, the entire Goal-resume + command sequence is retried,
+up to **three total attempts**, with a **five-second interval**. Before each retry,
+all previous attempt receipts are checked again; a late confirmed delivery stops
+retries without resending. Retries restart navigation and Goal handling, not just
+focus checks. Goal success from an earlier attempt is preserved in the final report.
+A failed chat does not stop the remaining selected chats. History-index delays
+are handled through the current rollout; event time and file position exclude
+old copied messages.
 The handled-chat set resets when quota transitions from limited to available,
 so a previous manual test does not suppress a later recovery cycle. Overlapping
 manual and automatic batches are blocked. Target and editor focus are checked before input; missing or ambiguous accessibility controls stop the operation.
@@ -18,8 +24,15 @@ manual and automatic batches are blocked. Target and editor focus are checked be
 Delivery regression checks:
 
 ```bash
-swiftc -lsqlite3 Sources/CodexReset/DeliveryReceipt.swift Tests/DeliveryReceipt/main.swift -o /tmp/codexreset-delivery-test
+swiftc -lsqlite3 Sources/CodexReset/RolloutMessageReceipt.swift Sources/CodexReset/DeliveryReceipt.swift Tests/DeliveryReceipt/main.swift -o /tmp/codexreset-delivery-test
 /tmp/codexreset-delivery-test
+```
+
+Full-sequence retry checks (no live UI input or real waiting):
+
+```bash
+swiftc -parse-as-library Sources/CodexReset/ResumeAttempts.swift Tests/FullResumeRetry/Test.swift -o /tmp/codexreset-retry-test
+/tmp/codexreset-retry-test
 ```
 
 Goal-state regression checks (no live UI input):
