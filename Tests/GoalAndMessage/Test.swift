@@ -53,6 +53,41 @@ import SQLite3
         catch { precondition(error.localizedDescription.contains("no such table")) }
         precondition(DesktopGoalAutomation.resumeLabels.contains("目標を再開"))
         precondition(!DesktopGoalAutomation.resumeLabels.contains("Resume"), "Generic buttons must not match")
+        // Actual incident: only the leading Markdown heading differs.
+        let savedTitle = "# 東京発スキーツアー全件調査（2026年11月・12月）## 目的…"
+        let shownTitle = "東京発スキーツアー全件調査（2026年11月・12月）## 目的…"
+        precondition(ChatTitleIdentity.matches(shownTitle, savedTitle))
+        precondition(ChatTitleIdentity.matches("東京発", "\\# 東京発"))
+        precondition(!ChatTitleIdentity.matches("東京発 (2)", savedTitle))
+        precondition(!ChatTitleIdentity.matches("sale", "#sale"))
+        precondition(ChatTitleIdentity.key("\\#sale") == "\\#sale")
+        precondition(!ChatTitleIdentity.isUnique(savedTitle, among: [savedTitle, shownTitle]))
+        precondition(ChatTitleIdentity.isUnique(savedTitle, among: [savedTitle, "Other chat"]))
+        precondition(GoalState.isRetryable(NSError(domain: "CodexReset.GoalDatabase", code: Int(SQLITE_CANTOPEN))))
+        precondition(!GoalState.isRetryable(NSError(domain: "CodexReset.GoalDatabase", code: Int(SQLITE_CORRUPT))))
+        // Reproduce prepare-time CANTOPEN with an inaccessible WAL path, then repair the fixture.
+        let walDir = dir.appendingPathComponent("wal-fixture")
+        try fm.createDirectory(at: walDir, withIntermediateDirectories: true)
+        let walPath = walDir.appendingPathComponent("goals_1.sqlite").path
+        var walWriter: OpaquePointer?
+        precondition(sqlite3_open(walPath, &walWriter) == SQLITE_OK)
+        precondition(sqlite3_exec(walWriter, "PRAGMA journal_mode=WAL; CREATE TABLE thread_goals(thread_id TEXT, goal_id TEXT, status TEXT); INSERT INTO thread_goals VALUES ('target', 'wal-goal', 'paused');", nil, nil, nil) == SQLITE_OK)
+        precondition(sqlite3_exec(walWriter, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, nil) == SQLITE_OK)
+        precondition(sqlite3_close(walWriter) == SQLITE_OK)
+        let inaccessibleWAL = walPath + "-wal"
+        // Fixture only: all writes are checkpointed and the writer is closed.
+        for suffix in ["-wal", "-shm"] where fm.fileExists(atPath: walPath + suffix) {
+            try fm.removeItem(atPath: walPath + suffix)
+        }
+        try fm.createDirectory(atPath: inaccessibleWAL, withIntermediateDirectories: false)
+        var walRetries: [String] = []
+        let walGoal = try GoalState.read(codexHome: walDir.path, threadId: "target", onRetry: { message in
+            walRetries.append(message)
+            if fm.fileExists(atPath: inaccessibleWAL) { try! fm.removeItem(atPath: inaccessibleWAL) }
+        })
+        precondition(walGoal?.id == "wal-goal" && !walRetries.isEmpty)
+        print("PASS: WAL sidecar access failure recovered after reopening: \(walRetries.first!)")
+        print("PASS: incident title match, legitimate hash preserved, title collisions refused, SQLite CANTOPEN retried")
         let capped = scanTree(root: 0, maxNodes: 4, maxSeconds: 10) { node in node == 0 ? [1, 2, 3, 4] : [] }
         precondition(capped.nodes == [0, 1, 2, 3] && capped.pendingCount == 0 && capped.limitHit)
         let cyclic = scanTree(root: 0, maxNodes: 10, maxSeconds: 10) { node in node == 0 ? [1, 1] : [0] }

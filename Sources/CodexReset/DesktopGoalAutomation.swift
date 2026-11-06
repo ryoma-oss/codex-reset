@@ -127,7 +127,7 @@ struct DesktopGoalAutomation {
     private func openVerifiedTarget() async throws -> (NSRunningApplication, AXUIElement, AXUIElement, String) {
         let chats = SQLiteReader(codexHome: codexHome).allThreads()
         guard let title = chats.first(where: { $0.threadId == threadId })?.title,
-              chats.filter({ $0.title == title }).count == 1 else {
+              ChatTitleIdentity.isUnique(title, among: chats.map(\.title)) else {
             throw desktopError("Target chat title is missing or ambiguous. Nothing clicked or typed.")
         }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").first,
@@ -195,12 +195,12 @@ struct DesktopGoalAutomation {
         return tree.nodes.map(\.element)
     }
     private func identifies(_ window: AXUIElement, title: String) -> Bool {
-        if Self.normalized(string(window, kAXTitleAttribute)) == title { return true }
+        if ChatTitleIdentity.matches(string(window, kAXTitleAttribute), title) { return true }
         return elements(window).contains { item in
             guard (attribute(item, kAXSelectedAttribute) as? Bool) == true else { return false }
             return elements(item).contains { child in
                 [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute].contains {
-                    Self.normalized(string(child, $0)) == title
+                    ChatTitleIdentity.matches(string(child, $0), title)
                 }
             }
         }
